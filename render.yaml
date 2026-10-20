@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: thadam-api
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt && python train.py
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: FRONTEND_ORIGIN
+        value: https://maritime-freight-pla-tpg6.bolt.host
+      - key: DATA_DIR
+        value: ./data
+      - key: ARTIFACT_DIR
+        value: ./artifacts

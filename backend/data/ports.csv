@@ -1,0 +1,21 @@
+port_id,port_name,country,port_role,latitude,longitude,max_permissible_draft_m,max_vessel_loa_m,max_vessel_beam_m,max_berth_dwt,cargo_handling_rate_tonnes_per_day,supported_cargo_types,port_congestion_index
+PRT_001,Newcastle,Australia,loading,-32.9283,151.7817,16.5,300,50,210000,45000,coal,0.25
+PRT_002,Port Hedland,Australia,loading,-20.3106,118.5753,18.5,330,55,250000,65000,iron_ore,0.3
+PRT_003,Gladstone,Australia,loading,-23.8427,151.2525,16.0,295,48,190000,40000,coal|wheat,0.2
+PRT_004,Samarinda,Indonesia,loading,-0.5022,117.1536,13.5,240,40,95000,28000,coal,0.45
+PRT_005,Banjarmasin,Indonesia,loading,-3.3194,114.5908,12.8,229,38,85000,25000,coal,0.5
+PRT_006,Tanjung Bara,Indonesia,loading,0.5283,117.6514,17.2,300,50,200000,48000,coal,0.22
+PRT_007,Richards Bay,South Africa,loading,-28.8,32.0833,17.5,310,50,210000,42000,coal|iron_ore,0.38
+PRT_008,Saldanha Bay,South Africa,loading,-33.0117,17.9447,19.0,330,55,240000,55000,iron_ore,0.28
+PRT_009,Maputo,Mozambique,loading,-25.9692,32.5732,14.2,255,43,110000,26000,coal|iron_ore,0.42
+PRT_010,Beira,Mozambique,loading,-19.8333,34.85,11.8,205,33,65000,18000,coal|wheat|fertilizer,0.48
+PRT_011,Norfolk,United States,loading,36.8508,-76.2859,15.2,292,46,175000,38000,coal|wheat,0.25
+PRT_012,New Orleans,United States,loading,29.9511,-90.0715,13.8,250,42,95000,32000,wheat|fertilizer,0.35
+PRT_013,Mina Saqr,UAE,loading,25.975,56.0469,16.8,300,50,195000,44000,limestone|fertilizer,0.18
+PRT_014,Paradip,India,both,20.2647,86.6766,16.5,295,48,185000,36000,coal|iron_ore|limestone|fertilizer,0.46
+PRT_015,Visakhapatnam,India,both,17.6868,83.2185,17.8,315,52,210000,40000,coal|iron_ore|wheat|fertilizer|limestone,0.38
+PRT_016,Gangavaram,India,discharge,17.6253,83.2392,18.8,325,54,225000,45000,coal|iron_ore|limestone,0.3
+PRT_017,Dhamra,India,discharge,20.7933,86.9686,17.5,310,50,205000,42000,coal|iron_ore|limestone|fertilizer,0.32
+PRT_018,Haldia,India,discharge,22.0253,88.0583,10.2,198,32,52000,16000,coal|wheat|fertilizer,0.65
+PRT_019,Gopalpur,India,both,19.2644,84.9125,14.5,260,44,115000,27000,coal|iron_ore|limestone|fertilizer,0.34
+PRT_020,Krishnapatnam,India,discharge,14.252,80.126,17.6,310,50,200000,41000,coal|iron_ore|wheat|fertilizer,0.29
