@@ -170,7 +170,11 @@ def optimal_voyage():
     valid_deadlines = orders.delivery_deadline.notna()
     orders.loc[valid_deadlines, "delivery_deadline"] = orders.loc[
         valid_deadlines, "delivery_deadline"
-    ].map(lambda deadline: deadline.replace(year=2027))
+    ].map(lambda deadline: (
+        deadline.replace(year=2027, day=28)
+        if deadline.month == 2 and deadline.day == 29
+        else deadline.replace(year=2027)
+    ))
     orders["quantity_mt"] = pd.to_numeric(orders.quantity_mt, errors="coerce")
     active_statuses = {"pending", "open", "active", "available"}
     orders = orders[orders.order_status.astype(str).str.casefold().isin(active_statuses)]
