@@ -164,6 +164,13 @@ def optimal_voyage():
     orders = FRAMES["cargo_orders"].copy()
     orders["order_time"] = pd.to_datetime(orders.order_time, errors="coerce")
     orders["delivery_deadline"] = pd.to_datetime(orders.delivery_deadline, errors="coerce")
+    # The Colab scenario resets every valid delivery deadline to 2027 before
+    # matching orders (cell 33). Keep this explicit so the web result follows
+    # the same scenario instead of rejecting historical-year deadlines.
+    valid_deadlines = orders.delivery_deadline.notna()
+    orders.loc[valid_deadlines, "delivery_deadline"] = orders.loc[
+        valid_deadlines, "delivery_deadline"
+    ].map(lambda deadline: deadline.replace(year=2027))
     orders["quantity_mt"] = pd.to_numeric(orders.quantity_mt, errors="coerce")
     active_statuses = {"pending", "open", "active", "available"}
     orders = orders[orders.order_status.astype(str).str.casefold().isin(active_statuses)]
