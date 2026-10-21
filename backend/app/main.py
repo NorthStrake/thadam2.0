@@ -309,3 +309,79 @@ def optimal_voyage():
             "order_selection": "lowest repositioning plus idle cost among eligible open orders for each vessel and month",
         },
     }
+
+
+@app.post("/optimal-voyage")
+def optimal_voyage_for_request(request: VoyageRequest):
+    """Choose the lowest-cost vessel and forecast month for a submitted voyage."""
+    forecast_result = forecast(request)
+    origin = find_port(request.origin_port)
+    destination = find_port(request.destination_port)
+    route = forecast_result["route"]
+
+    candidates = []
+    candidates_evaluated = 0
+    for vessel in forecast_result["vessels"]:
+        for monthly_rate in vessel["monthly_forecasts"]:
+            candidates_evaluated += 1
+            rate = monthly_rate["rate_usd_per_tonne"]
+            if rate is None:
+                continue
+            transit_days = float(vessel["estimated_transit_days"])
+            month_departure = pd.Timestamp(f"{monthly_rate['month']}-01")
+            estimated_arrival = (
+                month_departure + pd.to_timedelta(transit_days, unit="D")
+            ).ceil("D")
+            if estimated_arrival.date() > request.arrival_by:
+                continue
+            freight_cost = float(rate) * request.quantity_mt
+            candidates.append((freight_cost, estimated_arrival, vessel, monthly_rate))
+
+    if not candidates:
+        return {
+            "status": "no_eligible_match",
+            "message": "No compatible vessel has a forecast rate and arrives by the requested date.",
+            "request": request.model_dump(mode="json"),
+            "data_cutoff_month": forecast_result["data_cutoff_month"],
+            "candidates_evaluated": candidates_evaluated,
+        }
+
+    freight_cost, estimated_arrival, vessel, monthly_rate = min(
+        candidates,
+        key=lambda item: (item[0], item[1], item[2]["vessel_id"]),
+    )
+    vessel_row = FRAMES["vessels"].loc[FRAMES["vessels"].vessel_id == vessel["vessel_id"]].iloc[0]
+    optimal = {
+        "vessel_id": vessel["vessel_id"],
+        "vessel_name": vessel["vessel_name"],
+        "vessel_type": vessel["vessel_type"],
+        "month": monthly_rate["month"],
+        "selected_order_id": "CUSTOM_REQUEST",
+        "origin_port_id": str(origin.port_id),
+        "destination_port_id": str(destination.port_id),
+        "arrival_date": estimated_arrival.date().isoformat(),
+        "order_deadline": request.arrival_by.isoformat(),
+        "order_quantity_mt": request.quantity_mt,
+        "deadweight_tonnage_dwt": int(vessel_row.deadweight_tonnage_dwt),
+        "capacity_mt": vessel["capacity_mt"],
+        "distance_nm": route["distance_nm"],
+        "freight_rate_usd_per_tonne": round(float(monthly_rate["rate_usd_per_tonne"]), 3),
+        "predicted_freight_cost_usd": round(freight_cost, 2),
+        "reposition_cost_usd": 0.0,
+        "idle_days": 0,
+        "idle_cost_usd": 0.0,
+        "additional_cost_usd": 0.0,
+        "total_cost_usd": round(freight_cost, 2),
+    }
+    return {
+        "status": "success",
+        "request": request.model_dump(mode="json"),
+        "optimal": optimal,
+        "candidates_evaluated": candidates_evaluated,
+        "data_cutoff_month": forecast_result["data_cutoff_month"],
+        "assumptions": {
+            "selection_rule": "Lowest forecast freight cost among compatible vessels that arrive by the requested date.",
+            "freight_cost_basis": "Forecast USD per tonne multiplied by the submitted cargo quantity.",
+            "repositioning_and_idle_costs_included": False,
+        },
+    }

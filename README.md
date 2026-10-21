@@ -7,7 +7,8 @@ This folder contains the first Python API implementation for the THADAM maritime
 - `GET /health`: readiness check
 - `GET /options`: ports and cargo types for frontend selectors
 - `POST /forecast`: validate an origin, destination, cargo and quantity; screen compatible vessels against port constraints; return four monthly rate estimates and arrival-window flags
-- `GET /optimal-voyage`: reproduce the notebook's hardcoded Australia-to-Paradip then next-order scenario; return the lowest-cost vessel/month/order and cost breakdown
+- `POST /optimal-voyage`: select the lowest forecast freight-cost vessel/month for a submitted voyage request
+- `GET /optimal-voyage`: reproduce the notebook's fixed Australia-to-Paradip next-order scenario
 - `python train.py`: train four direct XGBoost forecast pipelines and write local artifacts
 
 The service uses the provided CSVs in `backend/data`. It excludes observations later than the current month when preparing model data, because the supplied synthetic dataset includes months that may be in the future. The API reports the latest included month and the carry-forward market-input assumption with each response.
@@ -30,7 +31,7 @@ If the browser frontend runs on another local port, set `FRONTEND_ORIGIN` to tha
 
 ## Connect the Bolt frontend later
 
-The frontend should send a JSON `POST` request to `/forecast` with these fields:
+The frontend should send a JSON `POST` request with these fields to `/forecast` for the four-month vessel forecast and `/optimal-voyage` for the lowest-cost eligible option:
 
 ```json
 {
@@ -42,7 +43,7 @@ The frontend should send a JSON `POST` request to `/forecast` with these fields:
 }
 ```
 
-The port field accepts either a port name or its `port_id`. Quantity is in metric tonnes. Point the frontend's submit function to the API URL. Keep secrets out of frontend code.
+The port field accepts either a port name or its `port_id`. Quantity is in metric tonnes. Point both frontend requests to the API URL. Keep secrets out of frontend code.
 
 ## Deployment outline
 
