@@ -13,7 +13,11 @@ from pydantic import BaseModel, Field
 from .modeling import DATA_DIR, ARTIFACT_DIR, GROUP_COLS, TARGET, load_data, load_models, prepare_monthly, forecast_for_series
 
 app = FastAPI(title="THADAM Freight Planning API", version="0.1.0")
-origins = [o.strip() for o in os.getenv("FRONTEND_ORIGIN", "http://localhost:5173").split(",") if o.strip()]
+origins = [
+    "http://localhost:5173",
+    "https://maritime-freight-pla-7z45.bolt.host",
+    *[o.strip() for o in os.getenv("FRONTEND_ORIGIN", "").split(",") if o.strip()],
+]
 app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=False,
                    allow_methods=["GET", "POST"], allow_headers=["*"])
 
