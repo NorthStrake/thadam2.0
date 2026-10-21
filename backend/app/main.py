@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from datetime import date
 from pathlib import Path
@@ -126,3 +127,170 @@ def forecast(request: VoyageRequest):
     return {"request": request.model_dump(mode="json"), "route": {"route_id": route_id, "distance_nm": float(route_row.distance_nm)},
             "data_cutoff_month": latest.strftime("%Y-%m"), "forecast_assumption": "Latest historical market indicators are carried forward; estimates are scenarios, not guarantees.",
             "vessels_considered": len(result_vessels), "vessels": result_vessels}
+
+
+@app.get("/optimal-voyage")
+def optimal_voyage():
+    """Reproduce the notebook's hardcoded Paradip next-order scenario.
+
+    Assumptions intentionally mirror the notebook: an initial 60,000 nm leg
+    from 2026-10-01 to Paradip (PRT_014), follow-on destinations PRT_014–020,
+    $1.50/nm repositioning and $5,000 per idle day.
+    """
+    if FRAMES is None or MODELS is None:
+        raise HTTPException(503, "Forecast service is not ready")
+
+    current_port = "PRT_014"
+    start_date = pd.Timestamp("2026-10-01")
+    initial_distance_nm = 60_000.0
+    reposition_cost_per_nm = 1.5
+    idle_cost_per_day = 5_000.0
+    destinations = [f"PRT_{i:03d}" for i in range(14, 21)]
+    months = ["2026-11", "2026-12", "2027-01", "2027-02"]
+
+    ports = FRAMES["ports"].set_index("port_id")
+    if current_port not in ports.index:
+        raise HTTPException(500, "The hardcoded Paradip port is missing from port data")
+    paradip = ports.loc[current_port]
+    vessel_pool = FRAMES["vessels"].copy()
+    vessel_pool = vessel_pool[
+        (vessel_pool.length_overall_m <= float(paradip.max_vessel_loa_m)) &
+        (vessel_pool.beam_m <= float(paradip.max_vessel_beam_m)) &
+        (vessel_pool.loaded_draft_m <= float(paradip.max_permissible_draft_m)) &
+        (vessel_pool.deadweight_tonnage_dwt <= float(paradip.max_berth_dwt))
+    ].copy()
+
+    route_distances = FRAMES["route_distances"]
+    orders = FRAMES["cargo_orders"].copy()
+    orders["order_time"] = pd.to_datetime(orders.order_time, errors="coerce")
+    orders["delivery_deadline"] = pd.to_datetime(orders.delivery_deadline, errors="coerce")
+    orders["quantity_mt"] = pd.to_numeric(orders.quantity_mt, errors="coerce")
+    active_statuses = {"pending", "open", "active", "available"}
+    orders = orders[orders.order_status.astype(str).str.casefold().isin(active_statuses)]
+    orders = orders.dropna(subset=["order_time", "delivery_deadline", "quantity_mt"])
+
+    latest = MONTHLY.date.max().to_period("M").to_timestamp()
+    first_forecast = latest + pd.DateOffset(months=1)
+    candidates = []
+
+    for destination_id in destinations:
+        route = route_distances[
+            (route_distances.origin_port_id.astype(str) == current_port) &
+            (route_distances.destination_port_id.astype(str) == destination_id)
+        ]
+        if route.empty:
+            continue
+        route_row = route.iloc[0]
+        route_id = str(route_row.route_id)
+        distance_nm = float(route_row.distance_nm)
+        matching_orders = orders[
+            (orders.origin_port_id.astype(str) == current_port) &
+            (orders.destination_port_id.astype(str) == destination_id)
+        ]
+        if matching_orders.empty:
+            continue
+
+        destination = ports.loc[destination_id] if destination_id in ports.index else None
+        if destination is None:
+            continue
+        compatible_vessels = vessel_pool.copy()
+        compatible_vessels = compatible_vessels[
+            (compatible_vessels.length_overall_m <= float(destination.max_vessel_loa_m)) &
+            (compatible_vessels.beam_m <= float(destination.max_vessel_beam_m)) &
+            (compatible_vessels.loaded_draft_m <= float(destination.max_permissible_draft_m)) &
+            (compatible_vessels.deadweight_tonnage_dwt <= float(destination.max_berth_dwt))
+        ]
+        if compatible_vessels.empty:
+            continue
+
+        rate_by_type = {}
+        for vessel_type in compatible_vessels.vessel_type.astype(str).unique():
+            predictions = forecast_for_series(
+                MONTHLY, FEATURES, BASE_DATE, MODELS, route_id, current_port,
+                destination_id, vessel_type, first_forecast
+            )
+            rate_by_type[vessel_type] = {
+                item["month"]: float(item["freight_rate_usd_per_tonne"])
+                for item in predictions
+            }
+
+        for _, vessel in compatible_vessels.iterrows():
+            speed = float(vessel.speed_knots)
+            if speed <= 0:
+                continue
+            initial_arrival = start_date + pd.to_timedelta(initial_distance_nm / (24 * speed), unit="D")
+            next_leg_days = round(distance_nm / (24 * speed))
+            first_arrival = (initial_arrival + pd.to_timedelta(next_leg_days, unit="D")).round("D")
+
+            for month_index, month in enumerate(months):
+                arrival = first_arrival + pd.DateOffset(months=month_index)
+                eligible = matching_orders[
+                    (matching_orders.quantity_mt <= float(vessel.deadweight_tonnage_dwt)) &
+                    (matching_orders.delivery_deadline >= arrival)
+                ].copy()
+                if eligible.empty:
+                    continue
+                eligible["idle_days"] = eligible.order_time.map(
+                    lambda available: math.ceil(max(0.0, (available - arrival).total_seconds() / 86400))
+                )
+                eligible["reposition_cost_usd"] = distance_nm * reposition_cost_per_nm
+                eligible["idle_cost_usd"] = eligible.idle_days * idle_cost_per_day
+                eligible["additional_cost_usd"] = eligible.reposition_cost_usd + eligible.idle_cost_usd
+                order = eligible.sort_values(["additional_cost_usd", "delivery_deadline"]).iloc[0]
+                rate = rate_by_type.get(str(vessel.vessel_type), {}).get(month)
+                if rate is None:
+                    continue
+                freight_cost = rate * float(vessel.deadweight_tonnage_dwt)
+                candidates.append({
+                    "vessel_id": str(vessel.vessel_id),
+                    "vessel_name": str(vessel.vessel_name),
+                    "vessel_type": str(vessel.vessel_type),
+                    "month": month,
+                    "selected_order_id": str(order.order_id),
+                    "origin_port_id": current_port,
+                    "destination_port_id": destination_id,
+                    "arrival_date": arrival.date().isoformat(),
+                    "order_deadline": order.delivery_deadline.date().isoformat(),
+                    "order_quantity_mt": int(order.quantity_mt),
+                    "deadweight_tonnage_dwt": int(vessel.deadweight_tonnage_dwt),
+                    "distance_nm": distance_nm,
+                    "freight_rate_usd_per_tonne": round(rate, 3),
+                    "predicted_freight_cost_usd": round(freight_cost, 2),
+                    "reposition_cost_usd": round(float(order.reposition_cost_usd), 2),
+                    "idle_days": int(order.idle_days),
+                    "idle_cost_usd": round(float(order.idle_cost_usd), 2),
+                    "additional_cost_usd": round(float(order.additional_cost_usd), 2),
+                    "total_cost_usd": round(freight_cost + float(order.additional_cost_usd), 2),
+                })
+
+    if not candidates:
+        return {
+            "status": "no_eligible_match",
+            "message": "No open order matched the hardcoded Paradip scenario and vessel constraints.",
+            "assumptions": {
+                "initial_origin": "Australia (hardcoded in notebook scenario)",
+                "initial_destination_port_id": current_port,
+                "initial_distance_nm": initial_distance_nm,
+                "start_date": start_date.date().isoformat(),
+                "reposition_cost_usd_per_nm": reposition_cost_per_nm,
+                "idle_cost_usd_per_day": idle_cost_per_day,
+            },
+        }
+
+    best = min(candidates, key=lambda item: item["total_cost_usd"])
+    return {
+        "status": "success",
+        "optimal": best,
+        "candidates_evaluated": len(candidates),
+        "data_cutoff_month": latest.strftime("%Y-%m"),
+        "assumptions": {
+            "initial_origin": "Australia (hardcoded in notebook scenario)",
+            "initial_destination_port_id": current_port,
+            "initial_distance_nm": initial_distance_nm,
+            "start_date": start_date.date().isoformat(),
+            "reposition_cost_usd_per_nm": reposition_cost_per_nm,
+            "idle_cost_usd_per_day": idle_cost_per_day,
+            "freight_cost_basis": "predicted USD/tonne multiplied by vessel deadweight tonnage",
+            "order_selection": "lowest repositioning plus idle cost among eligible open orders for each vessel and month",
+        },
+    }
