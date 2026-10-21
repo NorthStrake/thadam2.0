@@ -6,7 +6,7 @@ This folder contains the first Python API implementation for the THADAM maritime
 
 - `GET /health`: readiness check
 - `GET /options`: ports and cargo types for frontend selectors
-- `POST /forecast`: validate an origin, destination, cargo and quantity; screen compatible vessels against port constraints; return four monthly rate estimates and arrival-window flags
+- `POST /forecast`: validate an origin, destination, cargo and quantity; screen compatible vessels against port constraints; return four monthly rate estimates and arrival-window flags. For port pairs without direct rate history, the trained model uses the nearest available route history for the same vessel class and marks the result as `similar_route_model`.
 - `POST /optimal-voyage`: select the lowest forecast freight-cost vessel/month for a submitted voyage request
 - `GET /optimal-voyage`: reproduce the notebook's fixed Australia-to-Paradip next-order scenario
 - `python train.py`: train four direct XGBoost forecast pipelines and write local artifacts

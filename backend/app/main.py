@@ -91,6 +91,11 @@ def forecast(request: VoyageRequest):
         raise HTTPException(422, "No route distance is available for this port pair")
     route_row = route.iloc[0]
     route_id = str(route_row.route_id)
+    route_context = {
+        "distance_nm": float(route_row.distance_nm),
+        "origin_congestion_index": float(origin.port_congestion_index),
+        "destination_congestion_index": float(destination.port_congestion_index),
+    }
 
     vessels = FRAMES["vessels"].copy()
     compatibility = vessels.cargo_compatibility.fillna("").astype(str).str.casefold()
@@ -111,17 +116,23 @@ def forecast(request: VoyageRequest):
     for vessel_type in sorted(vessels.vessel_type.unique()):
         predictions = forecast_for_series(MONTHLY, FEATURES, BASE_DATE, MODELS, route_id,
                                           str(origin.port_id), str(destination.port_id),
-                                          str(vessel_type), first_forecast)
+                                          str(vessel_type), first_forecast, route_context)
         for p in predictions:
             rate_rows.append({"vessel_type": vessel_type, **p})
 
-    rate_lookup = {(x["vessel_type"], x["horizon_months"]): x["freight_rate_usd_per_tonne"] for x in rate_rows}
+    rate_lookup = {(x["vessel_type"], x["horizon_months"]): x for x in rate_rows}
     result_vessels = []
     for _, vessel in vessels.iterrows():
         transit_days = float(route_row.distance_nm) / (24 * float(vessel.speed_knots))
         estimated_arrival = (pd.Timestamp.today().normalize() + pd.to_timedelta(transit_days, unit="D")).date()
-        forecasts = [{"month": (first_forecast + pd.DateOffset(months=h - 1)).strftime("%Y-%m"),
-                      "rate_usd_per_tonne": rate_lookup.get((vessel.vessel_type, h))} for h in (1, 2, 3, 4)]
+        forecasts = []
+        for h in (1, 2, 3, 4):
+            prediction = rate_lookup.get((vessel.vessel_type, h))
+            forecasts.append({
+                "month": (first_forecast + pd.DateOffset(months=h - 1)).strftime("%Y-%m"),
+                "rate_usd_per_tonne": prediction["freight_rate_usd_per_tonne"] if prediction else None,
+                "forecast_basis": prediction["forecast_basis"] if prediction else None,
+            })
         eligible_for_window = estimated_arrival <= request.arrival_by
         result_vessels.append({"vessel_id": vessel.vessel_id, "vessel_name": vessel.vessel_name,
                                "vessel_type": vessel.vessel_type, "capacity_mt": int(vessel.usable_cargo_capacity_mt),

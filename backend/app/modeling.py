@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Optional
 
 import joblib
 import numpy as np
@@ -124,18 +125,61 @@ def load_models() -> tuple[dict[int, Pipeline], dict]:
 
 def forecast_for_series(monthly: pd.DataFrame, features: list[str], base_date: pd.Timestamp,
                         models: dict[int, Pipeline], route_id: str, origin_id: str,
-                        destination_id: str, vessel_type: str, first_forecast: pd.Timestamp) -> list[dict]:
+                        destination_id: str, vessel_type: str, first_forecast: pd.Timestamp,
+                        route_context: Optional[dict] = None) -> list[dict]:
     mask = (monthly.route_id == route_id) & (monthly.origin_port_id == origin_id) & \
            (monthly.destination_port_id == destination_id) & (monthly.vessel_type == vessel_type)
     history = monthly.loc[mask].sort_values("date")
+    forecast_basis = "historical_route"
     if history.empty:
-        return []
+        # The training data does not contain every selectable port pair. Use the
+        # nearest historical route for the same vessel class as an input baseline,
+        # then let the trained model predict with the requested route identifiers
+        # and route-specific measurements. This remains a model prediction rather
+        # than returning null or inventing a fixed freight rate.
+        analogs = monthly.loc[monthly.vessel_type.astype(str) == str(vessel_type)].copy()
+        if analogs.empty:
+            return []
+
+        latest_analogs = (analogs.sort_values("date")
+                          .groupby(GROUP_COLS, as_index=False, dropna=False)
+                          .tail(1).copy())
+        same_origin = latest_analogs.origin_port_id.astype(str) == str(origin_id)
+        same_destination = latest_analogs.destination_port_id.astype(str) == str(destination_id)
+        if same_origin.any():
+            latest_analogs = latest_analogs.loc[same_origin]
+        elif same_destination.any():
+            latest_analogs = latest_analogs.loc[same_destination]
+
+        if route_context and "distance_nm" in route_context and "distance_nm" in latest_analogs:
+            latest_analogs["_distance_gap"] = (
+                pd.to_numeric(latest_analogs.distance_nm, errors="coerce") -
+                float(route_context["distance_nm"])
+            ).abs()
+            latest_analogs = latest_analogs.sort_values("_distance_gap", na_position="last")
+
+        analog = latest_analogs.iloc[0]
+        analog_mask = pd.Series(True, index=monthly.index)
+        for column in GROUP_COLS:
+            analog_mask &= monthly[column].astype(str) == str(analog[column])
+        history = monthly.loc[analog_mask].sort_values("date")
+        forecast_basis = "similar_route_model"
+
     last = history.iloc[-1]
     actual = history[TARGET].astype(float).tolist()
     outputs = []
     for h in HORIZONS:
         month = first_forecast + pd.DateOffset(months=h - 1)
         row = last.to_dict()
+        # Categorical identifiers and route-specific numeric features must describe
+        # the requested route, even when lag history came from an analog route.
+        row.update({
+            "route_id": str(route_id),
+            "origin_port_id": str(origin_id),
+            "destination_port_id": str(destination_id),
+        })
+        if route_context:
+            row.update(route_context)
         for lag in LAGS:
             row[f"rate_lag_{lag}"] = actual[-lag] if len(actual) >= lag else np.nan
         for window in ROLLING:
@@ -145,5 +189,7 @@ def forecast_for_series(monthly: pd.DataFrame, features: list[str], base_date: p
         row["target_time_index"] = (month.year - base_date.year) * 12 + month.month - base_date.month
         x = pd.DataFrame([{feature: row.get(feature, np.nan) for feature in features}])
         rate = max(0.0, float(models[h].predict(x[features])[0]))
-        outputs.append({"month": month.strftime("%Y-%m"), "horizon_months": h, "freight_rate_usd_per_tonne": round(rate, 3)})
+        outputs.append({"month": month.strftime("%Y-%m"), "horizon_months": h,
+                        "freight_rate_usd_per_tonne": round(rate, 3),
+                        "forecast_basis": forecast_basis})
     return outputs
