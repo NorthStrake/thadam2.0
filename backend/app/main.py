@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from .modeling import DATA_DIR, ARTIFACT_DIR, GROUP_COLS, TARGET, load_data, load_models, prepare_monthly, forecast_for_series
+from .order_matching import find_best_next_order, REPOSITION_COST_PER_NM, IDLE_COST_PER_DAY
 
 app = FastAPI(title="THADAM Freight Planning API", version="0.1.0")
 origins = [
@@ -35,6 +36,13 @@ class VoyageRequest(BaseModel):
     cargo_type: str = Field(min_length=2, max_length=60)
     quantity_mt: float = Field(gt=0, le=500000)
     arrival_by: date
+
+
+class NextOrderRequest(BaseModel):
+    """Optional continuation input, normally populated from an optimal result."""
+    vessel_id: str = Field(min_length=2, max_length=100)
+    current_port: str = Field(min_length=2, max_length=100)
+    available_at: date
 
 
 @app.on_event("startup")
@@ -394,5 +402,105 @@ def optimal_voyage_for_request(request: VoyageRequest):
             "selection_rule": "Lowest forecast freight cost among compatible vessels that arrive by the requested date.",
             "freight_cost_basis": "Forecast USD per tonne multiplied by the submitted cargo quantity.",
             "repositioning_and_idle_costs_included": False,
+        },
+    }
+
+
+@app.post("/next-order")
+def next_order_for_vessel(request: NextOrderRequest):
+    """Return the lowest all-in-rate open order after the vessel becomes free.
+
+    This is a separate optional feature so the existing forecast and submitted
+    voyage optimizer remain unchanged. The frontend can call it after choosing
+    a vessel and provide that result's arrival port and date.
+    """
+    if FRAMES is None or MODELS is None or MONTHLY is None:
+        raise HTTPException(503, "Forecast service is not ready")
+
+    matches = FRAMES["vessels"][FRAMES["vessels"].vessel_id.astype(str) == request.vessel_id]
+    if matches.empty:
+        raise HTTPException(422, f"Unknown vessel: {request.vessel_id}")
+    vessel = matches.iloc[0]
+    current_port = find_port(request.current_port)
+    current_port_id = str(current_port.port_id)
+
+    latest = MONTHLY.date.max().to_period("M").to_timestamp()
+    first_forecast = latest + pd.DateOffset(months=1)
+    forecast_months = [
+        (first_forecast + pd.DateOffset(months=offset)).strftime("%Y-%m")
+        for offset in range(4)
+    ]
+    route_cache: dict[tuple[str, str, str], dict[str, dict]] = {}
+
+    def forecast_order_route(origin_id: str, destination_id: str, month: str) -> dict[str, dict]:
+        key = (origin_id, destination_id, str(vessel.vessel_type))
+        if key not in route_cache:
+            route_rows = FRAMES["route_distances"][(
+                FRAMES["route_distances"].origin_port_id.astype(str) == origin_id
+            ) & (
+                FRAMES["route_distances"].destination_port_id.astype(str) == destination_id
+            )]
+            if route_rows.empty:
+                route_cache[key] = {}
+            else:
+                route_row = route_rows.iloc[0]
+                origin_port = find_port(origin_id)
+                destination_port = find_port(destination_id)
+                route_context = {
+                    "distance_nm": float(route_row.distance_nm),
+                    "origin_congestion_index": float(origin_port.port_congestion_index),
+                    "destination_congestion_index": float(destination_port.port_congestion_index),
+                }
+                predictions = forecast_for_series(
+                    MONTHLY, FEATURES, BASE_DATE, MODELS, str(route_row.route_id),
+                    origin_id, destination_id, str(vessel.vessel_type), first_forecast,
+                    route_context,
+                )
+                route_cache[key] = {
+                    item["month"]: {
+                        "rate_usd_per_tonne": item["freight_rate_usd_per_tonne"],
+                        "forecast_basis": item["forecast_basis"],
+                    }
+                    for item in predictions
+                }
+        return route_cache[key]
+
+    next_order = find_best_next_order(
+        vessel=vessel,
+        current_port_id=current_port_id,
+        available_at=pd.Timestamp(request.available_at),
+        frames=FRAMES,
+        forecast_months=forecast_months,
+        route_rate_forecaster=forecast_order_route,
+    )
+    if next_order is None:
+        return {
+            "status": "no_eligible_next_order",
+            "message": "No open order meets the vessel, port, capacity, schedule, and forecast constraints.",
+            "vessel_id": str(vessel.vessel_id),
+            "current_port_id": current_port_id,
+            "available_at": request.available_at.isoformat(),
+            "data_cutoff_month": latest.strftime("%Y-%m"),
+        }
+
+    return {
+        "status": "success",
+        "vessel": {
+            "vessel_id": str(vessel.vessel_id),
+            "vessel_name": str(vessel.vessel_name),
+            "vessel_type": str(vessel.vessel_type),
+            "usable_cargo_capacity_mt": float(vessel.usable_cargo_capacity_mt),
+        },
+        "current_position": {"port_id": current_port_id, "port_name": str(current_port.port_name),
+                             "available_at": request.available_at.isoformat()},
+        "next_order": next_order,
+        "data_cutoff_month": latest.strftime("%Y-%m"),
+        "assumptions": {
+            "reposition_cost_usd_per_nm": REPOSITION_COST_PER_NM,
+            "idle_cost_usd_per_day": IDLE_COST_PER_DAY,
+            "order_freight_cost_basis": "route/vessel-type forecast rate multiplied by the matched order quantity",
+            "model_cargo_specificity": "The freight-rate dataset has no cargo-type label; rates are route- and vessel-type-based, not cargo-specific.",
+            "selection_rule": "Lowest all-in effective freight rate per tonne (forecast rate plus repositioning and idle costs divided by order quantity), among eligible open orders.",
+            "estimates_are_scenarios": True,
         },
     }

@@ -95,11 +95,45 @@ def make_pipeline(features: list[str], categorical: list[str]) -> Pipeline:
 def train_and_save(frames: dict[str, pd.DataFrame]) -> dict:
     monthly, features, categorical, base_date = prepare_monthly(frames["freight_rates"], frames["market_indicators"])
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+    # Measure performance on a chronological holdout before fitting the
+    # production models. The holdout targets are strictly later than training
+    # targets, matching how the model is used for future months.
+    all_dates = np.array(sorted(monthly["date"].dropna().unique()))
+    if len(all_dates) < 18:
+        raise ValueError("At least 18 distinct months are required for a temporal model evaluation.")
+    split_position = min(max(int(len(all_dates) * 0.80), 1), len(all_dates) - 5)
+    split_date = pd.Timestamp(all_dates[split_position])
+    last_historical_date = pd.Timestamp(all_dates[-1])
     trained = {}
+    evaluation = {}
     for h in HORIZONS:
         target = f"target_h{h}"
-        target_date = pd.to_datetime(monthly[f"target_date_h{h}"])
+        target_date_col = f"target_date_h{h}"
+        target_date = pd.to_datetime(monthly[target_date_col])
         frame = calendarize(monthly, target_date, base_date)
+        train_mask = frame[target].notna() & target_date.notna() & (target_date < split_date)
+        test_mask = (frame[target].notna() & target_date.notna() &
+                     (frame["date"] >= split_date) & (target_date <= last_historical_date))
+        if not train_mask.any() or not test_mask.any():
+            raise ValueError(f"Insufficient chronological train/test rows for horizon {h}.")
+
+        evaluation_model = make_pipeline(features, categorical)
+        evaluation_model.fit(frame.loc[train_mask, features], frame.loc[train_mask, target])
+        actual = frame.loc[test_mask, target].to_numpy(dtype=float)
+        predicted = evaluation_model.predict(frame.loc[test_mask, features]).astype(float)
+        absolute_error = np.abs(actual - predicted)
+        nonzero = np.abs(actual) > 1e-9
+        evaluation[f"month_{h}"] = {
+            "train_rows": int(train_mask.sum()),
+            "test_rows": int(test_mask.sum()),
+            "mae_usd_per_tonne": float(np.mean(absolute_error)),
+            "rmse_usd_per_tonne": float(np.sqrt(np.mean(np.square(actual - predicted)))),
+            "r2": float(1.0 - np.sum(np.square(actual - predicted)) /
+                        np.sum(np.square(actual - np.mean(actual)))) if len(actual) > 1 and np.var(actual) > 0 else None,
+            "wape_pct": float(100.0 * np.sum(absolute_error) / max(np.sum(np.abs(actual)), 1e-9)),
+            "within_10pct_pct": float(100.0 * np.mean(absolute_error[nonzero] <= 0.10 * np.abs(actual[nonzero]))) if nonzero.any() else None,
+        }
+
         valid = frame[target].notna() & target_date.notna()
         model = make_pipeline(features, categorical)
         model.fit(frame.loc[valid, features], frame.loc[valid, target])
@@ -109,7 +143,10 @@ def train_and_save(frames: dict[str, pd.DataFrame]) -> dict:
                 "categorical_features": categorical, "base_date": base_date.strftime("%Y-%m-%d"),
                 "history_start": monthly.date.min().strftime("%Y-%m-%d"),
                 "history_end": monthly.date.max().strftime("%Y-%m-%d"),
-                "training_rows": int(len(monthly))}
+                "training_rows": int(len(monthly)),
+                "evaluation_method": "chronological holdout; training targets precede the split and test origins begin at the split",
+                "evaluation_split_date": split_date.strftime("%Y-%m-%d"),
+                "holdout_metrics": evaluation}
     (ARTIFACT_DIR / "metadata.json").write_text(json.dumps(metadata, indent=2))
     return metadata
 
